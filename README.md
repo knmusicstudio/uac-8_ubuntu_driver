@@ -20,8 +20,8 @@ Install the required build dependencies:
 ```bash
 sudo apt update
 sudo apt install build-essential pkg-config libgtk-3-dev libjack-jackd2-dev libusb-1.0-0-dev
-Make sure your user belongs to the audio group and has appropriate permissions to access USB devices.
 ```
+Make sure your user belongs to the audio group and has appropriate permissions to access USB devices.
 How to Build
 ```bash
 git clone https://github.com/knmusicstudio/uac-8_ubuntu_driver/zoom-uac8-linux-bridg.git
