@@ -29,7 +29,7 @@ cd zoom-uac8-linux-bridge
 make
 ```
 How to Run
-Start JACK (e.g., via QjackCtl or command line).
+Start the JACK server using the dummy driver (e.g., via QjackCtl).
 
 Connect your ZOOM UAC-8 to your PC via USB.
 
@@ -69,7 +69,7 @@ cd zoom-uac8-linux-bridge
 make
 ```
 使い方
-QjackCtl 等を起動し、JACK サーバーを開始します。
+QjackCtl 等をdummyで起動し、JACK サーバーを開始します。
 
 ZOOM UAC-8 を PC に USB 接続します。
 
