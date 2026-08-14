@@ -63,7 +63,7 @@ sudo apt install build-essential pkg-config libgtk-3-dev libjack-jackd2-dev libu
 
 ビルド手順
 Bash
-git clone [https://github.com/](https://github.com/)<YOUR_GITHUB_USERNAME>/zoom-uac8-linux-bridge.git
+git clone https://github.com/knmusicstudio/uac-8_ubuntu_driver/zoom-uac8-linux-bridg.git
 cd zoom-uac8-linux-bridge
 make
 使い方
