@@ -55,7 +55,7 @@ JACK Audio Connection Kit と libusb を使用して、Linux 上で ZOOM UAC-8 �
 本ソフトウェアの使用は完全自己責任でお願いいたします。機器の故障、突発的な大音量による聴覚・機材への被害、データの損失等に関して、作者は一切の責任を負いません。
 
 必要パッケージの導入 (Ubuntu / Debian 系)
-ビルドに必要な依存パッケージをインストールしてください：```
+ビルドに必要な依存パッケージをインストールしてください
 ```Bash
 sudo apt update
 sudo apt install build-essential pkg-config libgtk-3-dev libjack-jackd2-dev libusb-1.0-0-dev
