@@ -1,3 +1,6 @@
+# ビルド生成物（今回の実行ファイル）
+uac8_bridge
+
 # Prerequisites
 *.d
 
