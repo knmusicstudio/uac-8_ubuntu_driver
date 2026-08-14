@@ -24,7 +24,7 @@ Make sure your user belongs to the audio group and has appropriate permissions t
 ```
 How to Build
 ```bash
-git clone [https://github.com/](https://github.com/)<YOUR_GITHUB_USERNAME>/zoom-uac8-linux-bridge.git
+git clone https://github.com/knmusicstudio/uac-8_ubuntu_driver/zoom-uac8-linux-bridg.git
 cd zoom-uac8-linux-bridge
 make
 ```
