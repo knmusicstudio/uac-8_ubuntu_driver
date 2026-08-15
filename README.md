@@ -55,14 +55,12 @@ MIT License
 
 JACK Audio Connection Kit と libusb を使用して、Linux 上で ZOOM UAC-8 オーディオインターフェースをNatve環境で動作させるための実験的なユーザ空間オーディオブリッジです。
 
-⚠️ 免責事項
+### ⚠️ 免責事項
 本プロジェクトは非公式かつ実験的なものです。
-
 株式会社ズーム（ZOOM Corporation）とは一切関係がなく、公式なサポートや推奨を受けたものではありません。
-
 本ソフトウェアの使用は完全自己責任でお願いいたします。機器の故障、突発的な大音量による聴覚・機材への被害、データの損失等に関して、作者は一切の責任を負いません。
 
-必要パッケージの導入 (Ubuntu / Debian 系)
+### 必要パッケージの導入 (Ubuntu / Debian 系)
 
 ビルドに必要な依存パッケージをインストールしてください
 ```Bash
@@ -71,13 +69,13 @@ sudo apt install build-essential pkg-config libgtk-3-dev libjack-jackd2-dev libu
 ```
 ※ お使いのユーザーが audio グループに所属し、USB デバイスへのアクセス権限を持っていることを確認してください。
 
-ビルド手順
+### ビルド手順
 ```Bash
 git clone https://github.com/knmusicstudio/zoom-uac8-linux-bridge.git
 cd zoom-uac8-linux-bridge
 make
 ```
-使い方
+### 使い方
 QjackCtl 等をdummyで起動し、JACK サーバーを開始します。
 
 ZOOM UAC-8 を PC に USB 接続します。
@@ -91,7 +89,7 @@ ZOOM UAC-8 を PC に USB 接続します。
 
 QjackCtl のパッチベイや接続画面で、uac8_jack:playback_1 〜 playback_18 に音声をルーティングします。
 
-動作環境
+### 動作環境
 * CPU: 64ビット（x86_64）プロセッサ（Intel Core i3 / AMD Ryzen 以上推奨、SSE2 / AVX 対応必須）
 * OS: Linux（Ubuntu 20.04 LTS 以降、Debian 11 以降、Arch Linux など）
 * USBポート: USB 3.0 (SuperSpeed) 必須（※USB 2.0 ポートでは帯域不足のため動作しません）
