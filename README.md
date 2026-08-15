@@ -46,6 +46,7 @@ MIT License
 
 <a name="japanese"></a>
 日本語
+
 JACK Audio Connection Kit と libusb を使用して、Linux 上で ZOOM UAC-8 オーディオインターフェースをNatve環境で動作させるための実験的なユーザ空間オーディオブリッジです。
 
 ⚠️ 免責事項
