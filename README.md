@@ -7,7 +7,7 @@
 <a name="english"></a>
 ## English
 
-An experimental user-space audio bridge for the **ZOOM UAC-8** audio interface on Linux via JACK Audio Connection Kit and libusb.
+An experimental user-space audio bridge to run the ZOOM UAC-8 audio interface in Native mode on Linux via JACK Audio Connection Kit and libusb.
 
 ### ⚠️ Disclaimer
 * This project is **unofficial and experimental**.
@@ -43,9 +43,10 @@ In QjackCtl / Patchbay, route audio to uac8_jack:playback_1 through playback_18.
 
 License
 MIT License
+
 <a name="japanese"></a>
 日本語
-JACK Audio Connection Kit と libusb を使用して、Linux 上で ZOOM UAC-8 オーディオインターフェースを動作させるための実験的なユーザ空間オーディオブリッジです。
+JACK Audio Connection Kit と libusb を使用して、Linux 上で ZOOM UAC-8 オーディオインターフェースをNatve環境で動作させるための実験的なユーザ空間オーディオブリッジです。
 
 ⚠️ 免責事項
 本プロジェクトは非公式かつ実験的なものです。
