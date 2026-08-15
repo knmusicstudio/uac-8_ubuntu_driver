@@ -19,21 +19,30 @@
 #define PACKET_SIZE        1024
 #define NUM_TRANSFERS      128
 
-#define JACK_CHANNELS      18
+#define JACK_IN_CHANNELS   18
+#define JACK_OUT_CHANNELS  20
 
 static volatile int running = 0;
 static volatile int active_transfers = 0;
 static jack_client_t *jack_client = NULL;
-static jack_port_t *output_ports[JACK_CHANNELS];
+static jack_port_t *input_ports[JACK_IN_CHANNELS];   // capture ports (Output from JACK client perspective)
+static jack_port_t *output_ports[JACK_OUT_CHANNELS]; // playback ports (Input to JACK client perspective)
 static libusb_device_handle *dev_handle = NULL;
 static libusb_context *ctx = NULL;
 static uint32_t current_sample_rate = 48000;
 static int target_alt_setting = 3;
 
 #define RING_BUFFER_SIZE (PACKET_SIZE * 16384)
-static unsigned char ring_buffer[RING_BUFFER_SIZE];
-static volatile int ring_head = 0;
-static volatile int ring_tail = 0;
+
+// 出力用リングバッファ (JACK -> USB OUT)
+static unsigned char ring_buffer_out[RING_BUFFER_SIZE];
+static volatile int ring_head_out = 0;
+static volatile int ring_tail_out = 0;
+
+// 入力用リングバッファ (USB IN -> JACK)
+static unsigned char ring_buffer_in[RING_BUFFER_SIZE];
+static volatile int ring_head_in = 0;
+static volatile int ring_tail_in = 0;
 
 static pthread_t audio_thread;
 
@@ -73,10 +82,17 @@ static void post_ui_update(const char *msg, gboolean start_sens, gboolean stop_s
     }
 }
 
-static inline int get_ring_avail(void) {
+static inline int get_ring_avail_out(void) {
     __sync_synchronize();
-    int h = ring_head;
-    int t = ring_tail;
+    int h = ring_head_out;
+    int t = ring_tail_out;
+    return (h - t + RING_BUFFER_SIZE) % RING_BUFFER_SIZE;
+}
+
+static inline int get_ring_avail_in(void) {
+    __sync_synchronize();
+    int h = ring_head_in;
+    int t = ring_tail_in;
     return (h - t + RING_BUFFER_SIZE) % RING_BUFFER_SIZE;
 }
 
@@ -89,14 +105,14 @@ static void LIBUSB_CALL cb_out(struct libusb_transfer *transfer) {
     if (transfer->status == LIBUSB_TRANSFER_STALL) {
         libusb_clear_halt(dev_handle, EP_AUDIO_OUT);
     } else if (transfer->status == LIBUSB_TRANSFER_COMPLETED) {
-        int avail = get_ring_avail();
+        int avail = get_ring_avail_out();
         if (avail >= PACKET_SIZE) {
-            int tail = ring_tail;
+            int tail = ring_tail_out;
             for (int i = 0; i < PACKET_SIZE; i++) {
-                transfer->buffer[i] = ring_buffer[(tail + i) % RING_BUFFER_SIZE];
+                transfer->buffer[i] = ring_buffer_out[(tail + i) % RING_BUFFER_SIZE];
             }
             __sync_synchronize();
-            ring_tail = (tail + PACKET_SIZE) % RING_BUFFER_SIZE;
+            ring_tail_out = (tail + PACKET_SIZE) % RING_BUFFER_SIZE;
         } else {
             memset(transfer->buffer, 0, PACKET_SIZE);
         }
@@ -119,6 +135,13 @@ static void LIBUSB_CALL cb_in(struct libusb_transfer *transfer) {
 
     if (transfer->status == LIBUSB_TRANSFER_STALL) {
         libusb_clear_halt(dev_handle, EP_AUDIO_IN);
+    } else if (transfer->status == LIBUSB_TRANSFER_COMPLETED) {
+        int head = ring_head_in;
+        for (int i = 0; i < PACKET_SIZE; i++) {
+            ring_buffer_in[(head + i) % RING_BUFFER_SIZE] = transfer->buffer[i];
+        }
+        __sync_synchronize();
+        ring_head_in = (head + PACKET_SIZE) % RING_BUFFER_SIZE;
     }
 
     if (running) {
@@ -135,19 +158,59 @@ int process_callback(jack_nframes_t nframes, void *arg) {
 
     if (!running) return 0;
 
-    jack_default_audio_sample_t *in_bufs[JACK_CHANNELS];
-    for (int i = 0; i < JACK_CHANNELS; i++) {
-        in_bufs[i] = (jack_default_audio_sample_t *)jack_port_get_buffer(output_ports[i], nframes);
+    // 1. 出力ポート（再生用）のバッファ取得
+    jack_default_audio_sample_t *play_bufs[JACK_OUT_CHANNELS];
+    for (int i = 0; i < JACK_OUT_CHANNELS; i++) {
+        play_bufs[i] = (jack_default_audio_sample_t *)jack_port_get_buffer(output_ports[i], nframes);
     }
 
-    int head = ring_head;
+    // 2. 入力ポート（録音用）のバッファ取得
+    jack_default_audio_sample_t *rec_bufs[JACK_IN_CHANNELS];
+    for (int i = 0; i < JACK_IN_CHANNELS; i++) {
+        rec_bufs[i] = (jack_default_audio_sample_t *)jack_port_get_buffer(input_ports[i], nframes);
+    }
+
+    // --- 入力（UAC-8 -> JACK Capture）の処理 ---
+    int in_avail = get_ring_avail_in();
+    int required_in_bytes = nframes * NUM_PHYS_CHANNELS * 4;
+
+    if (in_avail >= required_in_bytes) {
+        int tail_in = ring_tail_in;
+        for (jack_nframes_t s = 0; s < nframes; s++) {
+            for (int ch = 0; ch < NUM_PHYS_CHANNELS; ch++) {
+                uint8_t b0 = ring_buffer_in[tail_in];
+                uint8_t b1 = ring_buffer_in[(tail_in + 1) % RING_BUFFER_SIZE];
+                uint8_t b2 = ring_buffer_in[(tail_in + 2) % RING_BUFFER_SIZE];
+                uint8_t b3 = ring_buffer_in[(tail_in + 3) % RING_BUFFER_SIZE];
+                tail_in = (tail_in + 4) % RING_BUFFER_SIZE;
+
+                int32_t val32 = (int32_t)((uint32_t)b0 | ((uint32_t)b1 << 8) | ((uint32_t)b2 << 16) | ((uint32_t)b3 << 24));
+                float sample = (float)val32 / 2147483647.0f;
+
+                if (ch < JACK_IN_CHANNELS && rec_bufs[ch]) {
+                    rec_bufs[ch][s] = sample;
+                }
+            }
+        }
+        __sync_synchronize();
+        ring_tail_in = tail_in;
+    } else {
+        for (int ch = 0; ch < JACK_IN_CHANNELS; ch++) {
+            if (rec_bufs[ch]) {
+                memset(rec_bufs[ch], 0, sizeof(jack_default_audio_sample_t) * nframes);
+            }
+        }
+    }
+
+    // --- 出力（JACK Playback -> UAC-8）の処理 ---
+    int head_out = ring_head_out;
 
     for (jack_nframes_t s = 0; s < nframes; s++) {
         int32_t samples_32ch[NUM_PHYS_CHANNELS];
         memset(samples_32ch, 0, sizeof(samples_32ch));
 
-        for (int ch = 0; ch < JACK_CHANNELS; ch++) {
-            float sample = in_bufs[ch] ? in_bufs[ch][s] : 0.0f;
+        for (int ch = 0; ch < JACK_OUT_CHANNELS; ch++) {
+            float sample = play_bufs[ch] ? play_bufs[ch][s] : 0.0f;
 
             if (sample > 1.0f) sample = 1.0f;
             if (sample < -1.0f) sample = -1.0f;
@@ -170,16 +233,16 @@ int process_callback(jack_nframes_t nframes, void *arg) {
 
         for (int ch = 0; ch < NUM_PHYS_CHANNELS; ch++) {
             int32_t v = samples_32ch[ch];
-            ring_buffer[head]                           = (uint8_t)(v & 0xFF);
-            ring_buffer[(head + 1) % RING_BUFFER_SIZE] = (uint8_t)((v >> 8) & 0xFF);
-            ring_buffer[(head + 2) % RING_BUFFER_SIZE] = (uint8_t)((v >> 16) & 0xFF);
-            ring_buffer[(head + 3) % RING_BUFFER_SIZE] = (uint8_t)((v >> 24) & 0xFF);
-            head = (head + 4) % RING_BUFFER_SIZE;
+            ring_buffer_out[head_out]                         = (uint8_t)(v & 0xFF);
+            ring_buffer_out[(head_out + 1) % RING_BUFFER_SIZE] = (uint8_t)((v >> 8) & 0xFF);
+            ring_buffer_out[(head_out + 2) % RING_BUFFER_SIZE] = (uint8_t)((v >> 16) & 0xFF);
+            ring_buffer_out[(head_out + 3) % RING_BUFFER_SIZE] = (uint8_t)((v >> 24) & 0xFF);
+            head_out = (head_out + 4) % RING_BUFFER_SIZE;
         }
     }
 
     __sync_synchronize();
-    ring_head = head;
+    ring_head_out = head_out;
     return 0;
 }
 
@@ -216,7 +279,15 @@ static void *audio_worker_thread(void *arg) {
 
     jack_set_process_callback(jack_client, process_callback, NULL);
 
-    for (int i = 0; i < JACK_CHANNELS; i++) {
+    // 録音用ポート（capture_1 〜 capture_18）登録
+    for (int i = 0; i < JACK_IN_CHANNELS; i++) {
+        char port_name[32];
+        snprintf(port_name, sizeof(port_name), "capture_%d", i + 1);
+        input_ports[i] = jack_port_register(jack_client, port_name, JACK_DEFAULT_AUDIO_TYPE, JackPortIsOutput, 0);
+    }
+
+    // 再生用ポート（playback_1 〜 playback_20）登録
+    for (int i = 0; i < JACK_OUT_CHANNELS; i++) {
         char port_name[32];
         snprintf(port_name, sizeof(port_name), "playback_%d", i + 1);
         output_ports[i] = jack_port_register(jack_client, port_name, JACK_DEFAULT_AUDIO_TYPE, JackPortIsInput, 0);
@@ -300,7 +371,7 @@ static void *audio_worker_thread(void *arg) {
 
     jack_activate(jack_client);
 
-    while (get_ring_avail() < (PACKET_SIZE * 64) && running) {
+    while (get_ring_avail_out() < (PACKET_SIZE * 64) && running) {
         usleep(1000);
     }
 
@@ -367,9 +438,13 @@ static void on_start_clicked(GtkWidget *widget, gpointer data) {
     gtk_widget_set_sensitive(btn_start, FALSE);
     gtk_widget_set_sensitive(btn_stop, TRUE);
 
-    ring_head = 0;
-    ring_tail = 0;
-    memset(ring_buffer, 0, sizeof(ring_buffer));
+    ring_head_out = 0;
+    ring_tail_out = 0;
+    memset(ring_buffer_out, 0, sizeof(ring_buffer_out));
+
+    ring_head_in = 0;
+    ring_tail_in = 0;
+    memset(ring_buffer_in, 0, sizeof(ring_buffer_in));
 
     running = 1;
     pthread_create(&audio_thread, NULL, audio_worker_thread, NULL);
@@ -405,7 +480,6 @@ int main(int argc, char *argv[]) {
     GtkWidget *window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
     gtk_window_set_title(GTK_WINDOW(window), "ZOOM UAC-8 ブリッジ");
     
-    // ウィンドウサイズをゆったり（幅 450px, 高さ 180px）に変更
     gtk_window_set_default_size(GTK_WINDOW(window), 450, 180);
     gtk_container_set_border_width(GTK_CONTAINER(window), 20);
     g_signal_connect(window, "destroy", G_CALLBACK(on_window_destroy), NULL);
@@ -413,7 +487,6 @@ int main(int argc, char *argv[]) {
     GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 16);
     gtk_container_add(GTK_CONTAINER(window), vbox);
 
-    // 1. ボタン配置（ボタン自体の高さも確保）
     GtkWidget *hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
     gtk_widget_set_size_request(hbox, -1, 45);
 
@@ -428,7 +501,6 @@ int main(int argc, char *argv[]) {
     gtk_box_pack_start(GTK_BOX(hbox), btn_stop, TRUE, TRUE, 0);
     gtk_box_pack_start(GTK_BOX(vbox), hbox, FALSE, FALSE, 0);
 
-    // 2. ステータス表示
     lbl_status = gtk_label_new("停止中 (QjackCtl 起動後に「起動」を押してな)");
     gtk_label_set_line_wrap(GTK_LABEL(lbl_status), TRUE);
     gtk_label_set_justify(GTK_LABEL(lbl_status), GTK_JUSTIFY_CENTER);
