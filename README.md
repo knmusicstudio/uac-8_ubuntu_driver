@@ -43,7 +43,7 @@ In QjackCtl / Patchbay, route audio to uac8_jack:playback_1 through playback_18.
 
 License
 MIT License
-
+<a name="japanese"></a>
 日本語
 JACK Audio Connection Kit と libusb を使用して、Linux 上で ZOOM UAC-8 オーディオインターフェースを動作させるための実験的なユーザ空間オーディオブリッジです。
 
