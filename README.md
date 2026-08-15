@@ -80,7 +80,7 @@ QjackCtl 等をdummyで起動し、JACK サーバーを開始します。
 
 ZOOM UAC-8 を PC に USB 接続します。
 
-プログラムを実行します：
+プログラムを実行します。
 
 ```Bash
 ./uac8_bridge
