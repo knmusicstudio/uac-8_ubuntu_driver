@@ -42,12 +42,9 @@ Click "起動" (Start) on the GUI window.
 In QjackCtl / Patchbay, route audio to uac8_jack:playback_1 through playback_18.
 
 System Requirements
-
-CPU: 64-bit (x86_64) processor (Intel Core i3 / AMD Ryzen or better recommended, SSE2/AVX support required)
-
-OS: Linux (Ubuntu 20.04 LTS or later, Debian 11+, Arch Linux, etc.)
-
-USB: USB 3.0 (SuperSpeed) port REQUIRED (Does not work on USB 2.0 due to insufficient bandwidth)
+* CPU: 64-bit (x86_64) processor (Intel Core i3 / AMD Ryzen or better recommended, SSE2/AVX support required)
+* OS: Linux (Ubuntu 20.04 LTS or later, Debian 11+, Arch Linux, etc.)
+* USB: USB 3.0 (SuperSpeed) port REQUIRED (Does not work on USB 2.0 due to insufficient bandwidth)
 
 
 License
@@ -95,12 +92,9 @@ ZOOM UAC-8 を PC に USB 接続します。
 QjackCtl のパッチベイや接続画面で、uac8_jack:playback_1 〜 playback_18 に音声をルーティングします。
 
 動作環境
-
-CPU: 64ビット（x86_64）プロセッサ（Intel Core i3 / AMD Ryzen 以上推奨、SSE2 / AVX 対応必須）
-
-OS: Linux（Ubuntu 20.04 LTS 以降、Debian 11 以降、Arch Linux など）
-
-USBポート: USB 3.0 (SuperSpeed) 必須（※USB 2.0 ポートでは帯域不足のため動作しません）
+* CPU: 64ビット（x86_64）プロセッサ（Intel Core i3 / AMD Ryzen 以上推奨、SSE2 / AVX 対応必須）
+* OS: Linux（Ubuntu 20.04 LTS 以降、Debian 11 以降、Arch Linux など）
+* USBポート: USB 3.0 (SuperSpeed) 必須（※USB 2.0 ポートでは帯域不足のため動作しません）
 
 
 ライセンス
