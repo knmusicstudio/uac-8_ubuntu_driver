@@ -25,14 +25,15 @@
 static volatile int running = 0;
 static volatile int active_transfers = 0;
 static jack_client_t *jack_client = NULL;
-static jack_port_t *input_ports[JACK_IN_CHANNELS];   // capture ports (Output from JACK client perspective)
-static jack_port_t *output_ports[JACK_OUT_CHANNELS]; // playback ports (Input to JACK client perspective)
+static jack_port_t *input_ports[JACK_IN_CHANNELS];   // capture ports
+static jack_port_t *output_ports[JACK_OUT_CHANNELS]; // playback ports
 static libusb_device_handle *dev_handle = NULL;
 static libusb_context *ctx = NULL;
 static uint32_t current_sample_rate = 48000;
 static int target_alt_setting = 3;
 
 #define RING_BUFFER_SIZE (PACKET_SIZE * 16384)
+#define RING_BUFFER_MASK (RING_BUFFER_SIZE - 1)
 
 // 出力用リングバッファ (JACK -> USB OUT)
 static unsigned char ring_buffer_out[RING_BUFFER_SIZE];
@@ -86,14 +87,14 @@ static inline int get_ring_avail_out(void) {
     __sync_synchronize();
     int h = ring_head_out;
     int t = ring_tail_out;
-    return (h - t + RING_BUFFER_SIZE) % RING_BUFFER_SIZE;
+    return (h - t) & RING_BUFFER_MASK;
 }
 
 static inline int get_ring_avail_in(void) {
     __sync_synchronize();
     int h = ring_head_in;
     int t = ring_tail_in;
-    return (h - t + RING_BUFFER_SIZE) % RING_BUFFER_SIZE;
+    return (h - t) & RING_BUFFER_MASK;
 }
 
 static void LIBUSB_CALL cb_out(struct libusb_transfer *transfer) {
@@ -108,11 +109,15 @@ static void LIBUSB_CALL cb_out(struct libusb_transfer *transfer) {
         int avail = get_ring_avail_out();
         if (avail >= PACKET_SIZE) {
             int tail = ring_tail_out;
-            for (int i = 0; i < PACKET_SIZE; i++) {
-                transfer->buffer[i] = ring_buffer_out[(tail + i) % RING_BUFFER_SIZE];
+            int first_part = RING_BUFFER_SIZE - tail;
+            if (first_part >= PACKET_SIZE) {
+                memcpy(transfer->buffer, &ring_buffer_out[tail], PACKET_SIZE);
+            } else {
+                memcpy(transfer->buffer, &ring_buffer_out[tail], first_part);
+                memcpy(transfer->buffer + first_part, ring_buffer_out, PACKET_SIZE - first_part);
             }
             __sync_synchronize();
-            ring_tail_out = (tail + PACKET_SIZE) % RING_BUFFER_SIZE;
+            ring_tail_out = (tail + PACKET_SIZE) & RING_BUFFER_MASK;
         } else {
             memset(transfer->buffer, 0, PACKET_SIZE);
         }
@@ -137,11 +142,15 @@ static void LIBUSB_CALL cb_in(struct libusb_transfer *transfer) {
         libusb_clear_halt(dev_handle, EP_AUDIO_IN);
     } else if (transfer->status == LIBUSB_TRANSFER_COMPLETED) {
         int head = ring_head_in;
-        for (int i = 0; i < PACKET_SIZE; i++) {
-            ring_buffer_in[(head + i) % RING_BUFFER_SIZE] = transfer->buffer[i];
+        int first_part = RING_BUFFER_SIZE - head;
+        if (first_part >= PACKET_SIZE) {
+            memcpy(&ring_buffer_in[head], transfer->buffer, PACKET_SIZE);
+        } else {
+            memcpy(&ring_buffer_in[head], transfer->buffer, first_part);
+            memcpy(ring_buffer_in, transfer->buffer + first_part, PACKET_SIZE - first_part);
         }
         __sync_synchronize();
-        ring_head_in = (head + PACKET_SIZE) % RING_BUFFER_SIZE;
+        ring_head_in = (head + PACKET_SIZE) & RING_BUFFER_MASK;
     }
 
     if (running) {
@@ -176,19 +185,14 @@ int process_callback(jack_nframes_t nframes, void *arg) {
 
     if (in_avail >= required_in_bytes) {
         int tail_in = ring_tail_in;
+        const float inv_scale = 1.0f / 2147483647.0f;
         for (jack_nframes_t s = 0; s < nframes; s++) {
             for (int ch = 0; ch < NUM_PHYS_CHANNELS; ch++) {
-                uint8_t b0 = ring_buffer_in[tail_in];
-                uint8_t b1 = ring_buffer_in[(tail_in + 1) % RING_BUFFER_SIZE];
-                uint8_t b2 = ring_buffer_in[(tail_in + 2) % RING_BUFFER_SIZE];
-                uint8_t b3 = ring_buffer_in[(tail_in + 3) % RING_BUFFER_SIZE];
-                tail_in = (tail_in + 4) % RING_BUFFER_SIZE;
-
-                int32_t val32 = (int32_t)((uint32_t)b0 | ((uint32_t)b1 << 8) | ((uint32_t)b2 << 16) | ((uint32_t)b3 << 24));
-                float sample = (float)val32 / 2147483647.0f;
+                int32_t val32 = *(int32_t *)&ring_buffer_in[tail_in];
+                tail_in = (tail_in + 4) & RING_BUFFER_MASK;
 
                 if (ch < JACK_IN_CHANNELS && rec_bufs[ch]) {
-                    rec_bufs[ch][s] = sample;
+                    rec_bufs[ch][s] = (float)val32 * inv_scale;
                 }
             }
         }
@@ -231,14 +235,15 @@ int process_callback(jack_nframes_t nframes, void *arg) {
             }
         }
 
-        for (int ch = 0; ch < NUM_PHYS_CHANNELS; ch++) {
-            int32_t v = samples_32ch[ch];
-            ring_buffer_out[head_out]                         = (uint8_t)(v & 0xFF);
-            ring_buffer_out[(head_out + 1) % RING_BUFFER_SIZE] = (uint8_t)((v >> 8) & 0xFF);
-            ring_buffer_out[(head_out + 2) % RING_BUFFER_SIZE] = (uint8_t)((v >> 16) & 0xFF);
-            ring_buffer_out[(head_out + 3) % RING_BUFFER_SIZE] = (uint8_t)((v >> 24) & 0xFF);
-            head_out = (head_out + 4) % RING_BUFFER_SIZE;
+        int first_part = RING_BUFFER_SIZE - head_out;
+        int copy_bytes = sizeof(samples_32ch); // 128 bytes
+        if (first_part >= copy_bytes) {
+            memcpy(&ring_buffer_out[head_out], samples_32ch, copy_bytes);
+        } else {
+            memcpy(&ring_buffer_out[head_out], samples_32ch, first_part);
+            memcpy(ring_buffer_out, ((uint8_t *)samples_32ch) + first_part, copy_bytes - first_part);
         }
+        head_out = (head_out + copy_bytes) & RING_BUFFER_MASK;
     }
 
     __sync_synchronize();
