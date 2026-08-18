@@ -103,6 +103,16 @@ static void LIBUSB_CALL cb_out(struct libusb_transfer *transfer) {
         return;
     }
 
+    if (transfer->status == LIBUSB_TRANSFER_NO_DEVICE ||
+        transfer->status == LIBUSB_TRANSFER_ERROR) {
+        if (running) {
+            running = 0;
+            post_ui_update("エラー: USB接続が切断されました", TRUE, FALSE);
+        }
+        __sync_fetch_and_sub(&active_transfers, 1);
+        return;
+    }
+
     if (transfer->status == LIBUSB_TRANSFER_STALL) {
         libusb_clear_halt(dev_handle, EP_AUDIO_OUT);
     } else if (transfer->status == LIBUSB_TRANSFER_COMPLETED) {
@@ -138,19 +148,35 @@ static void LIBUSB_CALL cb_in(struct libusb_transfer *transfer) {
         return;
     }
 
+    if (transfer->status == LIBUSB_TRANSFER_NO_DEVICE ||
+        transfer->status == LIBUSB_TRANSFER_ERROR) {
+        if (running) {
+            running = 0;
+            post_ui_update("エラー: USB接続が切断されました", TRUE, FALSE);
+        }
+        __sync_fetch_and_sub(&active_transfers, 1);
+        return;
+    }
+
     if (transfer->status == LIBUSB_TRANSFER_STALL) {
         libusb_clear_halt(dev_handle, EP_AUDIO_IN);
     } else if (transfer->status == LIBUSB_TRANSFER_COMPLETED) {
-        int head = ring_head_in;
-        int first_part = RING_BUFFER_SIZE - head;
-        if (first_part >= PACKET_SIZE) {
-            memcpy(&ring_buffer_in[head], transfer->buffer, PACKET_SIZE);
-        } else {
-            memcpy(&ring_buffer_in[head], transfer->buffer, first_part);
-            memcpy(ring_buffer_in, transfer->buffer + first_part, PACKET_SIZE - first_part);
+        int avail = get_ring_avail_in();
+        int free_bytes = (RING_BUFFER_SIZE - 1) - avail;
+
+        if (free_bytes >= PACKET_SIZE) {
+            int head = ring_head_in;
+            int first_part = RING_BUFFER_SIZE - head;
+            if (first_part >= PACKET_SIZE) {
+                memcpy(&ring_buffer_in[head], transfer->buffer, PACKET_SIZE);
+            } else {
+                memcpy(&ring_buffer_in[head], transfer->buffer, first_part);
+                memcpy(ring_buffer_in, transfer->buffer + first_part, PACKET_SIZE - first_part);
+            }
+            __sync_synchronize();
+            ring_head_in = (head + PACKET_SIZE) & RING_BUFFER_MASK;
         }
-        __sync_synchronize();
-        ring_head_in = (head + PACKET_SIZE) & RING_BUFFER_MASK;
+        // 空き容量不足時はオーバーランとして破棄
     }
 
     if (running) {
@@ -207,47 +233,49 @@ int process_callback(jack_nframes_t nframes, void *arg) {
     }
 
     // --- 出力（JACK Playback -> UAC-8）の処理 ---
-    int head_out = ring_head_out;
+    int out_avail = get_ring_avail_out();
+    int free_out_bytes = (RING_BUFFER_SIZE - 1) - out_avail;
+    int required_out_bytes = nframes * NUM_PHYS_CHANNELS * 4;
 
-    for (jack_nframes_t s = 0; s < nframes; s++) {
-        int32_t samples_32ch[NUM_PHYS_CHANNELS];
-        memset(samples_32ch, 0, sizeof(samples_32ch));
+    if (free_out_bytes >= required_out_bytes) {
+        int head_out = ring_head_out;
 
-        for (int ch = 0; ch < JACK_OUT_CHANNELS; ch++) {
-            float sample = play_bufs[ch] ? play_bufs[ch][s] : 0.0f;
+        for (jack_nframes_t s = 0; s < nframes; s++) {
+            int32_t samples_32ch[NUM_PHYS_CHANNELS];
+            memset(samples_32ch, 0, sizeof(samples_32ch));
 
-            if (sample > 1.0f) sample = 1.0f;
-            if (sample < -1.0f) sample = -1.0f;
-            int32_t val32 = (int32_t)(sample * 2147483647.0f);
+            for (int ch = 0; ch < JACK_OUT_CHANNELS; ch++) {
+                float sample = play_bufs[ch] ? play_bufs[ch][s] : 0.0f;
 
-            if (ch == 0) {
-                samples_32ch[0]  = val32; // Main L (Ch 1)
-                samples_32ch[2]  = val32; // Out 3
-                samples_32ch[10] = val32; // 192k HP L
-                samples_32ch[18] = val32; // 48k/96k HP L
-            } else if (ch == 1) {
-                samples_32ch[1]  = val32; // Main R (Ch 2)
-                samples_32ch[3]  = val32; // Out 4
-                samples_32ch[11] = val32; // 192k HP R
-                samples_32ch[19] = val32; // 48k/96k HP R
-            } else {
-                samples_32ch[ch] = val32;
+                if (sample > 1.0f) sample = 1.0f;
+                if (sample < -1.0f) sample = -1.0f;
+                samples_32ch[ch] = (int32_t)(sample * 2147483647.0f);
             }
+
+            // ループの外でMain L/Rをミラーリング（後続チャンネルによる上書きを防止）
+            samples_32ch[2]  = samples_32ch[0]; // Out 3
+            samples_32ch[10] = samples_32ch[0]; // 192k HP L
+            samples_32ch[18] = samples_32ch[0]; // 48k/96k HP L
+
+            samples_32ch[3]  = samples_32ch[1]; // Out 4
+            samples_32ch[11] = samples_32ch[1]; // 192k HP R
+            samples_32ch[19] = samples_32ch[1]; // 48k/96k HP R
+
+            int first_part = RING_BUFFER_SIZE - head_out;
+            int copy_bytes = sizeof(samples_32ch); // 128 bytes
+            if (first_part >= copy_bytes) {
+                memcpy(&ring_buffer_out[head_out], samples_32ch, copy_bytes);
+            } else {
+                memcpy(&ring_buffer_out[head_out], samples_32ch, first_part);
+                memcpy(ring_buffer_out, ((uint8_t *)samples_32ch) + first_part, copy_bytes - first_part);
+            }
+            head_out = (head_out + copy_bytes) & RING_BUFFER_MASK;
         }
 
-        int first_part = RING_BUFFER_SIZE - head_out;
-        int copy_bytes = sizeof(samples_32ch); // 128 bytes
-        if (first_part >= copy_bytes) {
-            memcpy(&ring_buffer_out[head_out], samples_32ch, copy_bytes);
-        } else {
-            memcpy(&ring_buffer_out[head_out], samples_32ch, first_part);
-            memcpy(ring_buffer_out, ((uint8_t *)samples_32ch) + first_part, copy_bytes - first_part);
-        }
-        head_out = (head_out + copy_bytes) & RING_BUFFER_MASK;
+        __sync_synchronize();
+        ring_head_out = head_out;
     }
 
-    __sync_synchronize();
-    ring_head_out = head_out;
     return 0;
 }
 
@@ -262,6 +290,7 @@ static void *audio_worker_thread(void *arg) {
     if (!jack_client) {
         post_ui_update("エラー: JACK (QjackCtl) が起動してへんで！", TRUE, FALSE);
         running = 0;
+        pthread_detach(pthread_self());
         return NULL;
     }
 
@@ -305,6 +334,7 @@ static void *audio_worker_thread(void *arg) {
         jack_client_close(jack_client);
         jack_client = NULL;
         running = 0;
+        pthread_detach(pthread_self());
         return NULL;
     }
 
@@ -316,6 +346,7 @@ static void *audio_worker_thread(void *arg) {
         jack_client_close(jack_client);
         jack_client = NULL;
         running = 0;
+        pthread_detach(pthread_self());
         return NULL;
     }
 
@@ -433,6 +464,14 @@ static void *audio_worker_thread(void *arg) {
     return NULL;
 }
 
+// 非同期停止用スレッド本体
+static void *stop_worker_thread(void *arg) {
+    (void)arg;
+    pthread_join(audio_thread, NULL);
+    post_ui_update("停止中 (QjackCtl 起動後に「起動」を押してな)", TRUE, FALSE);
+    return NULL;
+}
+
 // 起動ボタンのコールバック
 static void on_start_clicked(GtkWidget *widget, gpointer data) {
     (void)widget;
@@ -462,11 +501,11 @@ static void on_stop_clicked(GtkWidget *widget, gpointer data) {
     if (!running) return;
 
     running = 0;
-    pthread_join(audio_thread, NULL);
+    post_ui_update("停止中...", FALSE, FALSE);
 
-    gtk_label_set_text(GTK_LABEL(lbl_status), "停止中 (QjackCtl 起動後に「起動」を押してな)");
-    gtk_widget_set_sensitive(btn_start, TRUE);
-    gtk_widget_set_sensitive(btn_stop, FALSE);
+    pthread_t stop_thread;
+    pthread_create(&stop_thread, NULL, stop_worker_thread, NULL);
+    pthread_detach(stop_thread);
 }
 
 static void on_window_destroy(GtkWidget *widget, gpointer data) {
