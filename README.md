@@ -2,7 +2,7 @@
 [English](#english) | [日本語](#japanese)
 
 ---
-<img src="Screenshot_20260815_023223.png">
+<img src="ss.png">
 <a name="english"></a>
 ## English
 
