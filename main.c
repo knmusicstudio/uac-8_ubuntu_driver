@@ -382,7 +382,7 @@ static int start_jackd_auto(void) {
             dup2(dev_null, STDERR_FILENO);
             close(dev_null);
         }
-        execlp("jackd", "jackd", "-d", "dummy", "-r", "96000", "-p", "512", "-n", "3", NULL);
+        execlp("jackd", "jackd", "-d", "dummy", "-r", "96000", "-p", "512", NULL);
         _exit(1);
     } else if (pid > 0) {
         spawned_jackd_pid = pid;
