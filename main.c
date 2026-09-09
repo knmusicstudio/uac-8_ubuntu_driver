@@ -16,7 +16,6 @@
 
 #define VENDOR_ID  0x1686
 #define PRODUCT_ID 0xF02B
-
 #define EP_AUDIO_OUT 0x01
 #define EP_AUDIO_IN  0x82
 
@@ -26,7 +25,6 @@
 
 #define JACK_IN_CHANNELS   18
 #define JACK_OUT_CHANNELS  20
-
 #define PERIOD_COUNT       3
 
 static volatile int running = 0;
@@ -36,12 +34,13 @@ static jack_port_t *input_ports[JACK_IN_CHANNELS];   // Capture ports
 static jack_port_t *output_ports[JACK_OUT_CHANNELS]; // Playback ports
 static libusb_device_handle *dev_handle = NULL;
 static libusb_context *ctx = NULL;
-static volatile uint32_t current_sample_rate = 96000;
-static volatile jack_nframes_t current_buffer_size = 512;
-static int target_alt_setting = 2;
 
+static volatile uint32_t current_sample_rate = 96000;
+static volatile jack_nframes_t current_buffer_size = 1024;
+static int target_alt_setting = 2;
 static int debug_mode = 1;
 static pid_t spawned_jackd_pid = 0;
+static pid_t spawned_a2j_pid = 0;
 
 #define RING_BUFFER_SIZE (PACKET_SIZE * 32768)
 #define RING_BUFFER_MASK (RING_BUFFER_SIZE - 1)
@@ -109,6 +108,39 @@ static inline int get_ring_avail_in(void) {
     return (h - t) & RING_BUFFER_MASK;
 }
 
+// Helper: Start a2jmidid
+static void start_a2jmidid(void) {
+    if (spawned_a2j_pid > 0) return;
+    pid_t pid = fork();
+    if (pid == 0) {
+        int dev_null = open("/dev/null", O_WRONLY);
+        if (dev_null >= 0) {
+            dup2(dev_null, STDOUT_FILENO);
+            dup2(dev_null, STDERR_FILENO);
+            close(dev_null);
+        }
+        execlp("a2jmidid", "a2jmidid", "-e", NULL);
+        _exit(1);
+    } else if (pid > 0) {
+        spawned_a2j_pid = pid;
+        if (debug_mode) {
+            printf("[INFO] Started a2jmidid (PID: %d)\n", spawned_a2j_pid);
+        }
+    }
+}
+
+// Helper: Stop a2jmidid
+static void stop_a2jmidid(void) {
+    if (spawned_a2j_pid > 0) {
+        kill(spawned_a2j_pid, SIGTERM);
+        waitpid(spawned_a2j_pid, NULL, 0);
+        if (debug_mode) {
+            printf("[INFO] Stopped a2jmidid (PID: %d)\n", spawned_a2j_pid);
+        }
+        spawned_a2j_pid = 0;
+    }
+}
+
 // JACK XRUN detection callback
 static int xrun_callback(void *arg) {
     (void)arg;
@@ -141,6 +173,7 @@ static void jack_shutdown_callback(void *arg) {
     if (debug_mode) {
         printf("[WARN] JACK server shutdown detected\n");
     }
+    stop_a2jmidid();
     jack_client = NULL;
     running = 0;
     post_ui_update("JACK stopped (Waiting for reconnection)", TRUE, FALSE);
@@ -342,15 +375,6 @@ int process_callback(jack_nframes_t nframes, void *arg) {
                 samples_32ch[ch] = (int32_t)(sample * 2147483647.0f);
             }
 
-            // Mirror Main L/R to hardware outputs & headphone ports
-            samples_32ch[2]  = samples_32ch[0]; // Out 3
-            samples_32ch[10] = samples_32ch[0]; // 192k Headphone L
-            samples_32ch[18] = samples_32ch[0]; // 48k/96k Headphone L
-
-            samples_32ch[3]  = samples_32ch[1]; // Out 4
-            samples_32ch[11] = samples_32ch[1]; // 192k Headphone R
-            samples_32ch[19] = samples_32ch[1]; // 48k/96k Headphone R
-
             int first_part = RING_BUFFER_SIZE - head_out;
             int copy_bytes = sizeof(samples_32ch);
             if (first_part >= copy_bytes) {
@@ -372,7 +396,7 @@ int process_callback(jack_nframes_t nframes, void *arg) {
 // Fallback: spawn jackd automatically if not running
 static int start_jackd_auto(void) {
     if (debug_mode) {
-        printf("[INFO] JACK server not found. Spawning jackd (96kHz / 512 / Period 3)...\n");
+        printf("[INFO] JACK server not found. Spawning jackd (96kHz / 1024 / Period 3)...\n");
     }
     pid_t pid = fork();
     if (pid == 0) {
@@ -382,7 +406,7 @@ static int start_jackd_auto(void) {
             dup2(dev_null, STDERR_FILENO);
             close(dev_null);
         }
-        execlp("jackd", "jackd", "-d", "dummy", "-r", "96000", "-p", "512", NULL);
+        execlp("jackd", "jackd", "-d", "dummy", "-r", "96000", "-p", "1024", NULL);
         _exit(1);
     } else if (pid > 0) {
         spawned_jackd_pid = pid;
@@ -410,6 +434,8 @@ static void *audio_worker_thread(void *arg) {
             return NULL;
         }
     }
+
+    jack_set_buffer_size(jack_client, 1024);
 
     current_sample_rate = jack_get_sample_rate(jack_client);
     current_buffer_size = jack_get_buffer_size(jack_client);
@@ -548,11 +574,16 @@ static void *audio_worker_thread(void *arg) {
 
     jack_activate(jack_client);
 
+    // JACK起動後に a2jmidid を立ち上げる
+    start_a2jmidid();
+
     while (running) {
         usleep(100000);
     }
 
     // Teardown & cleanup
+    stop_a2jmidid();
+
     if (jack_client) {
         jack_deactivate(jack_client);
         jack_client_close(jack_client);
@@ -649,6 +680,7 @@ static void on_window_destroy(GtkWidget *widget, gpointer data) {
         running = 0;
         pthread_join(audio_thread, NULL);
     }
+    stop_a2jmidid();
     if (spawned_jackd_pid > 0) {
         kill(spawned_jackd_pid, SIGTERM);
         waitpid(spawned_jackd_pid, NULL, 0);
