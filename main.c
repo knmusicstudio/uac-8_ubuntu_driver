@@ -574,7 +574,7 @@ static void *audio_worker_thread(void *arg) {
 
     jack_activate(jack_client);
 
-    // JACK起動後に a2jmidid を立ち上げる
+    // Start a2jmidid after JACK server activation
     start_a2jmidid();
 
     while (running) {
