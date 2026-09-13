@@ -29,6 +29,8 @@
 
 static volatile int running = 0;
 static volatile int active_transfers = 0;
+static volatile int sample_rate_needs_reinit = 0;
+
 static jack_client_t *jack_client = NULL;
 static jack_port_t *input_ports[JACK_IN_CHANNELS];   // Capture ports
 static jack_port_t *output_ports[JACK_OUT_CHANNELS]; // Playback ports
@@ -154,16 +156,23 @@ static int buffer_size_callback(jack_nframes_t nframes, void *arg) {
     (void)arg;
     current_buffer_size = nframes;
     if (debug_mode) {
-        printf("[INFO] Buffer size changed: %u frames\n", nframes);
+        printf("[INFO] Buffer size changed dynamically via JACK/QjackCtl: %u frames\n", nframes);
     }
+    char status_msg[128];
+    snprintf(status_msg, sizeof(status_msg), "Running: %u Hz / %u frames (Alt %d)", 
+             current_sample_rate, current_buffer_size, target_alt_setting);
+    post_ui_update(status_msg, FALSE, TRUE);
     return 0;
 }
 
 static int sample_rate_callback(jack_nframes_t nframes, void *arg) {
     (void)arg;
-    current_sample_rate = nframes;
-    if (debug_mode) {
-        printf("[INFO] Sample rate changed: %u Hz\n", nframes);
+    if (current_sample_rate != nframes) {
+        current_sample_rate = nframes;
+        sample_rate_needs_reinit = 1;
+        if (debug_mode) {
+            printf("[INFO] Sample rate changed via JACK/QjackCtl: %u Hz (Hardware reinitialization required)\n", nframes);
+        }
     }
     return 0;
 }
@@ -214,7 +223,6 @@ static void LIBUSB_CALL cb_out(struct libusb_transfer *transfer) {
             __sync_synchronize();
             ring_tail_out = (tail + PACKET_SIZE) & RING_BUFFER_MASK;
         } else {
-            // Buffer underrun on USB OUT
             if (debug_mode) {
                 fprintf(stderr, "\033[1;35m[DEBUG OUT]\033[0m Underrun (USB OUT buffer starved: %d bytes left)\n", avail);
             }
@@ -268,7 +276,6 @@ static void LIBUSB_CALL cb_in(struct libusb_transfer *transfer) {
             __sync_synchronize();
             ring_head_in = (head + PACKET_SIZE) & RING_BUFFER_MASK;
         } else {
-            // Buffer overrun on USB IN
             if (debug_mode) {
                 fprintf(stderr, "\033[1;35m[DEBUG IN]\033[0m Overrun (USB IN ring buffer overflow)\n");
             }
@@ -396,7 +403,7 @@ int process_callback(jack_nframes_t nframes, void *arg) {
 // Fallback: spawn jackd automatically if not running
 static int start_jackd_auto(void) {
     if (debug_mode) {
-        printf("[INFO] JACK server not found. Spawning jackd (96kHz / 1024 / Period 3)...\n");
+        printf("[INFO] JACK server not found. Spawning fallback jackd...\n");
     }
     pid_t pid = fork();
     if (pid == 0) {
@@ -406,7 +413,7 @@ static int start_jackd_auto(void) {
             dup2(dev_null, STDERR_FILENO);
             close(dev_null);
         }
-        execlp("jackd", "jackd", "-d", "dummy", "-r", "96000", "-p", "1024", NULL);
+        execlp("jackd", "jackd", "-d", "dummy", NULL);
         _exit(1);
     } else if (pid > 0) {
         spawned_jackd_pid = pid;
@@ -416,13 +423,59 @@ static int start_jackd_auto(void) {
     return -1;
 }
 
+static int configure_uac8_hardware(void) {
+    if (!dev_handle) return -1;
+
+    for (int iface = 0; iface < 4; iface++) {
+        if (libusb_kernel_driver_active(dev_handle, iface) == 1) {
+            libusb_detach_kernel_driver(dev_handle, iface);
+        }
+        libusb_claim_interface(dev_handle, iface);
+    }
+
+    libusb_set_interface_alt_setting(dev_handle, 1, 0);
+    libusb_set_interface_alt_setting(dev_handle, 2, 0);
+    usleep(20000);
+
+    unsigned char clk_sel = 1;
+    libusb_control_transfer(dev_handle, 0x21, 0x01, 0x0100, 0x2900, &clk_sel, 1, 1000);
+
+    unsigned char rate_data[4];
+    rate_data[0] = (current_sample_rate >> 0) & 0xFF;
+    rate_data[1] = (current_sample_rate >> 8) & 0xFF;
+    rate_data[2] = (current_sample_rate >> 16) & 0xFF;
+    rate_data[3] = (current_sample_rate >> 24) & 0xFF;
+    libusb_control_transfer(dev_handle, 0x21, 0x01, 0x0100, 0x2500, rate_data, 4, 1000);
+    libusb_control_transfer(dev_handle, 0x21, 0x01, 0x0100, 0x2800, rate_data, 4, 1000);
+
+    unsigned char unmute_val[2] = {0x00, 0x00};
+    libusb_control_transfer(dev_handle, 0x21, 0x01, 0x0100, 0x2900, unmute_val, 2, 1000);
+    libusb_control_transfer(dev_handle, 0x21, 0x01, 0x0200, 0x2900, unmute_val, 2, 1000);
+
+    unsigned char vol_val[2] = {0x00, 0x00};
+    libusb_control_transfer(dev_handle, 0x21, 0x01, 0x0201, 0x2900, vol_val, 2, 1000);
+    libusb_control_transfer(dev_handle, 0x21, 0x01, 0x0202, 0x2900, vol_val, 2, 1000);
+
+    libusb_control_transfer(dev_handle, 0x01, 0x0B, target_alt_setting, 0x0001, NULL, 0, 1000);
+    libusb_control_transfer(dev_handle, 0x01, 0x0B, target_alt_setting, 0x0002, NULL, 0, 1000);
+    libusb_control_transfer(dev_handle, 0x02, 0x01, 0x0000, 0x0001, NULL, 0, 1000);
+    libusb_control_transfer(dev_handle, 0x02, 0x01, 0x0000, 0x0082, NULL, 0, 1000);
+    libusb_control_transfer(dev_handle, 0x01, 0x0B, target_alt_setting, 0x0001, NULL, 0, 1000);
+    libusb_control_transfer(dev_handle, 0x01, 0x0B, target_alt_setting, 0x0002, NULL, 0, 1000);
+
+    libusb_set_interface_alt_setting(dev_handle, 1, target_alt_setting);
+    libusb_set_interface_alt_setting(dev_handle, 2, target_alt_setting);
+
+    return 0;
+}
+
 // Audio initialization and transfer worker
 static void *audio_worker_thread(void *arg) {
     (void)arg;
     int r;
     jack_status_t status;
 
-    // 1. Connect to JACK server
+    // 1. Connect to JACK server (Respecting qjackctl configuration)
     jack_client = jack_client_open("uac8_jack", JackNoStartServer, &status);
     if (!jack_client) {
         start_jackd_auto();
@@ -435,8 +488,7 @@ static void *audio_worker_thread(void *arg) {
         }
     }
 
-    jack_set_buffer_size(jack_client, 1024);
-
+    // Retrieve sample rate and buffer size specified by QjackCtl
     current_sample_rate = jack_get_sample_rate(jack_client);
     current_buffer_size = jack_get_buffer_size(jack_client);
 
@@ -449,12 +501,12 @@ static void *audio_worker_thread(void *arg) {
     }
 
     if (debug_mode) {
-        printf("[INFO] Connected to JACK: %u Hz / Buffer: %d frames (Alt Setting: %d)\n",
+        printf("[INFO] Connected to JACK: %u Hz / Buffer: %u frames (Alt Setting: %d)\n",
                current_sample_rate, current_buffer_size, target_alt_setting);
     }
 
     char status_msg[128];
-    snprintf(status_msg, sizeof(status_msg), "Running: %u Hz / %d frames (Alt %d)", 
+    snprintf(status_msg, sizeof(status_msg), "Running: %u Hz / %u frames (Alt %d)", 
              current_sample_rate, current_buffer_size, target_alt_setting);
     post_ui_update(status_msg, FALSE, TRUE);
 
@@ -499,45 +551,7 @@ static void *audio_worker_thread(void *arg) {
         return NULL;
     }
 
-    for (int iface = 0; iface < 4; iface++) {
-        if (libusb_kernel_driver_active(dev_handle, iface) == 1) {
-            libusb_detach_kernel_driver(dev_handle, iface);
-        }
-        libusb_claim_interface(dev_handle, iface);
-    }
-
-    libusb_set_interface_alt_setting(dev_handle, 1, 0);
-    libusb_set_interface_alt_setting(dev_handle, 2, 0);
-    usleep(20000);
-
-    unsigned char clk_sel = 1;
-    libusb_control_transfer(dev_handle, 0x21, 0x01, 0x0100, 0x2900, &clk_sel, 1, 1000);
-
-    unsigned char rate_data[4];
-    rate_data[0] = (current_sample_rate >> 0) & 0xFF;
-    rate_data[1] = (current_sample_rate >> 8) & 0xFF;
-    rate_data[2] = (current_sample_rate >> 16) & 0xFF;
-    rate_data[3] = (current_sample_rate >> 24) & 0xFF;
-    libusb_control_transfer(dev_handle, 0x21, 0x01, 0x0100, 0x2500, rate_data, 4, 1000);
-    libusb_control_transfer(dev_handle, 0x21, 0x01, 0x0100, 0x2800, rate_data, 4, 1000);
-
-    unsigned char unmute_val[2] = {0x00, 0x00};
-    libusb_control_transfer(dev_handle, 0x21, 0x01, 0x0100, 0x2900, unmute_val, 2, 1000);
-    libusb_control_transfer(dev_handle, 0x21, 0x01, 0x0200, 0x2900, unmute_val, 2, 1000);
-
-    unsigned char vol_val[2] = {0x00, 0x00};
-    libusb_control_transfer(dev_handle, 0x21, 0x01, 0x0201, 0x2900, vol_val, 2, 1000);
-    libusb_control_transfer(dev_handle, 0x21, 0x01, 0x0202, 0x2900, vol_val, 2, 1000);
-
-    libusb_control_transfer(dev_handle, 0x01, 0x0B, target_alt_setting, 0x0001, NULL, 0, 1000);
-    libusb_control_transfer(dev_handle, 0x01, 0x0B, target_alt_setting, 0x0002, NULL, 0, 1000);
-    libusb_control_transfer(dev_handle, 0x02, 0x01, 0x0000, 0x0001, NULL, 0, 1000);
-    libusb_control_transfer(dev_handle, 0x02, 0x01, 0x0000, 0x0082, NULL, 0, 1000);
-    libusb_control_transfer(dev_handle, 0x01, 0x0B, target_alt_setting, 0x0001, NULL, 0, 1000);
-    libusb_control_transfer(dev_handle, 0x01, 0x0B, target_alt_setting, 0x0002, NULL, 0, 1000);
-
-    libusb_set_interface_alt_setting(dev_handle, 1, target_alt_setting);
-    libusb_set_interface_alt_setting(dev_handle, 2, target_alt_setting);
+    configure_uac8_hardware();
 
     // 3. Setup bulk transfers
     struct libusb_transfer *out_transfers[NUM_TRANSFERS];
@@ -574,10 +588,26 @@ static void *audio_worker_thread(void *arg) {
 
     jack_activate(jack_client);
 
-    // Start a2jmidid after JACK server activation
     start_a2jmidid();
 
     while (running) {
+        if (sample_rate_needs_reinit) {
+            sample_rate_needs_reinit = 0;
+            if (debug_mode) {
+                printf("[INFO] Reconfiguring UAC-8 hardware for new sample rate: %u Hz\n", current_sample_rate);
+            }
+            if (current_sample_rate >= 176400) {
+                target_alt_setting = 1;
+            } else if (current_sample_rate >= 88200) {
+                target_alt_setting = 2;
+            } else {
+                target_alt_setting = 3;
+            }
+            configure_uac8_hardware();
+            snprintf(status_msg, sizeof(status_msg), "Running: %u Hz / %u frames (Alt %d)", 
+                     current_sample_rate, current_buffer_size, target_alt_setting);
+            post_ui_update(status_msg, FALSE, TRUE);
+        }
         usleep(100000);
     }
 
