@@ -167,6 +167,11 @@ static int buffer_size_callback(jack_nframes_t nframes, void *arg) {
 
 static int sample_rate_callback(jack_nframes_t nframes, void *arg) {
     (void)arg;
+    if (nframes != 96000) {
+        if (debug_mode) {
+            fprintf(stderr, "\033[1;33m[WARN]\033[0m Non-96kHz sample rate detected via JACK: %u Hz (96000 Hz recommended)\n", nframes);
+        }
+    }
     if (current_sample_rate != nframes) {
         current_sample_rate = nframes;
         sample_rate_needs_reinit = 1;
@@ -400,10 +405,10 @@ int process_callback(jack_nframes_t nframes, void *arg) {
     return 0;
 }
 
-// Fallback: spawn jackd automatically if not running
+// Fallback: spawn jackd automatically at 96000 Hz if not running
 static int start_jackd_auto(void) {
     if (debug_mode) {
-        printf("[INFO] JACK server not found. Spawning fallback jackd...\n");
+        printf("[INFO] JACK server not found. Spawning fallback jackd at 96000 Hz...\n");
     }
     pid_t pid = fork();
     if (pid == 0) {
@@ -413,7 +418,7 @@ static int start_jackd_auto(void) {
             dup2(dev_null, STDERR_FILENO);
             close(dev_null);
         }
-        execlp("jackd", "jackd", "-d", "dummy", NULL);
+        execlp("jackd", "jackd", "-R", "-d", "dummy", "-r", "96000", "-p", "1024", NULL);
         _exit(1);
     } else if (pid > 0) {
         spawned_jackd_pid = pid;
@@ -475,7 +480,7 @@ static void *audio_worker_thread(void *arg) {
     int r;
     jack_status_t status;
 
-    // 1. Connect to JACK server (Respecting qjackctl configuration)
+    // 1. Connect to JACK server
     jack_client = jack_client_open("uac8_jack", JackNoStartServer, &status);
     if (!jack_client) {
         start_jackd_auto();
@@ -488,17 +493,24 @@ static void *audio_worker_thread(void *arg) {
         }
     }
 
-    // Retrieve sample rate and buffer size specified by QjackCtl
     current_sample_rate = jack_get_sample_rate(jack_client);
     current_buffer_size = jack_get_buffer_size(jack_client);
 
-    if (current_sample_rate >= 176400) {
-        target_alt_setting = 1;
-    } else if (current_sample_rate >= 88200) {
-        target_alt_setting = 2;
-    } else {
-        target_alt_setting = 3;
+    if (current_sample_rate != 96000) {
+        if (debug_mode) {
+            fprintf(stderr, "\033[1;31m[ERROR]\033[0m JACK is running at %u Hz, but 96000 Hz is required!\n", current_sample_rate);
+        }
+        char err_msg[128];
+        snprintf(err_msg, sizeof(err_msg), "Error: JACK is %u Hz (96000 Hz required)", current_sample_rate);
+        post_ui_update(err_msg, TRUE, FALSE);
+        jack_client_close(jack_client);
+        jack_client = NULL;
+        running = 0;
+        pthread_detach(pthread_self());
+        return NULL;
     }
+
+    target_alt_setting = 2;
 
     if (debug_mode) {
         printf("[INFO] Connected to JACK: %u Hz / Buffer: %u frames (Alt Setting: %d)\n",
@@ -594,7 +606,7 @@ static void *audio_worker_thread(void *arg) {
         if (sample_rate_needs_reinit) {
             sample_rate_needs_reinit = 0;
             if (debug_mode) {
-                printf("[INFO] Reconfiguring UAC-8 hardware for new sample rate: %u Hz\n", current_sample_rate);
+                printf("[INFO] Reconfiguring UAC-8 hardware for sample rate: %u Hz\n", current_sample_rate);
             }
             if (current_sample_rate >= 176400) {
                 target_alt_setting = 1;
