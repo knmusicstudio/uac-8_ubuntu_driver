@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <signal.h>
@@ -14,10 +15,10 @@
 #include <jack/jack.h>
 #include <libusb-1.0/libusb.h>
 
-#define VENDOR_ID  0x1686
-#define PRODUCT_ID 0xF02B
-#define EP_AUDIO_OUT 0x01
-#define EP_AUDIO_IN  0x82
+#define VENDOR_ID          0x1686
+#define PRODUCT_ID         0xF02B
+#define EP_AUDIO_OUT       0x01
+#define EP_AUDIO_IN        0x82
 
 #define NUM_PHYS_CHANNELS  32
 #define PACKET_SIZE        1024
@@ -87,7 +88,7 @@ static gboolean update_ui_idle(gpointer user_data) {
 }
 
 static void post_ui_update(const char *msg, gboolean start_sens, gboolean stop_sens) {
-    UIUpdateData *data = malloc(sizeof(UIUpdateData));
+    UIUpdateData *data = (UIUpdateData *)malloc(sizeof(UIUpdateData));
     if (data) {
         data->message = msg ? strdup(msg) : NULL;
         data->start_sensitive = start_sens;
@@ -303,7 +304,7 @@ static void *usb_event_worker_thread(void *arg) {
     param.sched_priority = 80;
     pthread_setschedparam(pthread_self(), SCHED_FIFO, &param);
 
-    while (running) {
+    while (running || active_transfers > 0) {
         struct timeval tv = {0, 2000};
         libusb_handle_events_timeout_completed(ctx, &tv, NULL);
     }
@@ -328,14 +329,14 @@ int process_callback(jack_nframes_t nframes, void *arg) {
 
     // --- Input Processing (UAC-8 USB -> JACK Capture) ---
     int in_avail = get_ring_avail_in();
-    int frame_bytes = NUM_PHYS_CHANNELS * 4; // 1 frame = 128 bytes
+    int frame_bytes = NUM_PHYS_CHANNELS * (int)sizeof(int32_t); // 32 channels * 4 bytes = 128 bytes
     int target_cushion = (int)nframes * frame_bytes * PERIOD_COUNT;
 
     int tail_in = ring_tail_in;
     const float inv_scale = 1.0f / 2147483647.0f;
     static float prev_sample[NUM_PHYS_CHANNELS] = {0};
 
-    // Clock drift compensation: skip a frame if buffer is overflowing
+    // Clock drift compensation: 1フレーム単位（128バイト）で厳密に整合性を保ってスキップ
     if (in_avail > target_cushion + (frame_bytes * 32)) {
         tail_in = (tail_in + frame_bytes) & RING_BUFFER_MASK;
         in_avail -= frame_bytes;
@@ -343,20 +344,29 @@ int process_callback(jack_nframes_t nframes, void *arg) {
 
     for (jack_nframes_t s = 0; s < nframes; s++) {
         if (in_avail >= frame_bytes) {
-            for (int ch = 0; ch < NUM_PHYS_CHANNELS; ch++) {
-                int32_t val32 = *(int32_t *)&ring_buffer_in[tail_in];
-                tail_in = (tail_in + 4) & RING_BUFFER_MASK;
+            int32_t frame_samples[NUM_PHYS_CHANNELS];
+            int first_part = RING_BUFFER_SIZE - tail_in;
 
-                float sample_val = (float)val32 * inv_scale;
+            // リングバッファ境界跨ぎの安全な取り出し処理
+            if (first_part >= frame_bytes) {
+                memcpy(frame_samples, &ring_buffer_in[tail_in], frame_bytes);
+            } else {
+                memcpy(frame_samples, &ring_buffer_in[tail_in], first_part);
+                memcpy(((uint8_t *)frame_samples) + first_part, ring_buffer_in, frame_bytes - first_part);
+            }
+            tail_in = (tail_in + frame_bytes) & RING_BUFFER_MASK;
+            in_avail -= frame_bytes;
+
+            for (int ch = 0; ch < NUM_PHYS_CHANNELS; ch++) {
+                float sample_val = (float)frame_samples[ch] * inv_scale;
                 prev_sample[ch] = sample_val;
 
                 if (ch < JACK_IN_CHANNELS && rec_bufs[ch]) {
                     rec_bufs[ch][s] = sample_val;
                 }
             }
-            in_avail -= frame_bytes;
         } else {
-            // Buffer starvation concealment: decay previous sample
+            // バッファ枯渇時のコンシールメント
             for (int ch = 0; ch < JACK_IN_CHANNELS; ch++) {
                 if (rec_bufs[ch]) {
                     rec_bufs[ch][s] = prev_sample[ch] * 0.98f;
@@ -371,7 +381,7 @@ int process_callback(jack_nframes_t nframes, void *arg) {
     // --- Output Processing (JACK Playback -> UAC-8 USB) ---
     int out_avail = get_ring_avail_out();
     int free_out_bytes = (RING_BUFFER_SIZE - 1) - out_avail;
-    int required_out_bytes = nframes * NUM_PHYS_CHANNELS * 4;
+    int required_out_bytes = (int)nframes * frame_bytes;
 
     if (free_out_bytes >= required_out_bytes) {
         int head_out = ring_head_out;
@@ -431,7 +441,8 @@ static int start_jackd_auto(void) {
 static int configure_uac8_hardware(void) {
     if (!dev_handle) return -1;
 
-    for (int iface = 0; iface < 4; iface++) {
+    // Interface 0: Control, 1: Audio OUT, 2: Audio IN のみを対象にする（3のMIDIはALSA用に残す）
+    for (int iface = 0; iface <= 2; iface++) {
         if (libusb_kernel_driver_active(dev_handle, iface) == 1) {
             libusb_detach_kernel_driver(dev_handle, iface);
         }
@@ -574,14 +585,14 @@ static void *audio_worker_thread(void *arg) {
     active_transfers = NUM_TRANSFERS * 2;
 
     for (int i = 0; i < NUM_TRANSFERS; i++) {
-        in_buffers[i] = calloc(1, PACKET_SIZE);
+        in_buffers[i] = (unsigned char *)calloc(1, PACKET_SIZE);
         in_transfers[i] = libusb_alloc_transfer(0);
         libusb_fill_bulk_transfer(in_transfers[i], dev_handle, EP_AUDIO_IN, in_buffers[i], PACKET_SIZE, cb_in, NULL, 0);
         libusb_submit_transfer(in_transfers[i]);
     }
 
     for (int i = 0; i < NUM_TRANSFERS; i++) {
-        out_buffers[i] = calloc(1, PACKET_SIZE);
+        out_buffers[i] = (unsigned char *)calloc(1, PACKET_SIZE);
         out_transfers[i] = libusb_alloc_transfer(0);
         libusb_fill_bulk_transfer(out_transfers[i], dev_handle, EP_AUDIO_OUT, out_buffers[i], PACKET_SIZE, cb_out, NULL, 0);
         libusb_submit_transfer(out_transfers[i]);
@@ -599,7 +610,6 @@ static void *audio_worker_thread(void *arg) {
     ring_tail_out = 0;
 
     jack_activate(jack_client);
-
     start_a2jmidid();
 
     while (running) {
@@ -623,7 +633,7 @@ static void *audio_worker_thread(void *arg) {
         usleep(100000);
     }
 
-    // Teardown & cleanup
+    // --- Teardown & cleanup ---
     stop_a2jmidid();
 
     if (jack_client) {
@@ -632,6 +642,19 @@ static void *audio_worker_thread(void *arg) {
         jack_client = NULL;
     }
 
+    // 全ての転送をキャンセル
+    for (int i = 0; i < NUM_TRANSFERS; i++) {
+        if (out_transfers[i]) libusb_cancel_transfer(out_transfers[i]);
+        if (in_transfers[i])  libusb_cancel_transfer(in_transfers[i]);
+    }
+
+    // イベントスレッドが生きてる状態でキャンセル完了（active_transfers == 0）を待つ
+    int safety_timeout = 200;
+    while (active_transfers > 0 && safety_timeout-- > 0) {
+        usleep(10000);
+    }
+
+    // 転送イベントを処理し終えてからイベントスレッドを終了・合流
     pthread_join(usb_event_thread, NULL);
 
     if (spawned_jackd_pid > 0) {
@@ -641,24 +664,13 @@ static void *audio_worker_thread(void *arg) {
     }
 
     for (int i = 0; i < NUM_TRANSFERS; i++) {
-        if (out_transfers[i]) libusb_cancel_transfer(out_transfers[i]);
-        if (in_transfers[i])  libusb_cancel_transfer(in_transfers[i]);
-    }
-
-    int safety_timeout = 200;
-    while (active_transfers > 0 && safety_timeout-- > 0) {
-        struct timeval tv = {0, 10000};
-        libusb_handle_events_timeout_completed(ctx, &tv, NULL);
-    }
-
-    for (int i = 0; i < NUM_TRANSFERS; i++) {
         if (out_transfers[i]) libusb_free_transfer(out_transfers[i]);
         if (in_transfers[i])  libusb_free_transfer(in_transfers[i]);
         free(out_buffers[i]);
         free(in_buffers[i]);
     }
 
-    for (int iface = 0; iface < 4; iface++) {
+    for (int iface = 0; iface <= 2; iface++) {
         libusb_release_interface(dev_handle, iface);
     }
 
