@@ -2,16 +2,28 @@
 [English](#english) | [日本語](#japanese)
 
 ---
+
+> 🚀 **NEW: Native ALSA Kernel Driver is now available!**  
+> We have developed a native Linux kernel driver (`snd-uac8`). You no longer need this userspace bridge or dummy JACK server!  
+> 👉 **Get the Native ALSA Driver here:** [https://github.com/knmusicstudio/uac-8_ubuntu_driver_alsa](https://github.com/knmusicstudio/uac-8_ubuntu_driver_alsa)
+
+> 🚀 **【お知らせ】Native ALSA カーネルドライバを公開しました！**  
+> カーネル空間でネイティブ動作する ALSA ドライバ（`snd-uac8`）を開発しました。このユーザ空間ブリッジや dummy JACK なしで、直接 ALSA / JACK / PipeWire から認識させて利用可能です！  
+> 👉 **Native ALSA ドライバはこちら:** [https://github.com/knmusicstudio/uac-8_ubuntu_driver_alsa](https://github.com/knmusicstudio/uac-8_ubuntu_driver_alsa)
+
+---
 <img src="ss.png">
 <a name="english"></a>
 ## English
 
 An experimental user-space audio bridge to run the ZOOM UAC-8 audio interface in Native mode on Linux via JACK Audio Connection Kit and libusb.
 
+> 💡 **Notice:** A native in-kernel ALSA driver is now available! Check out [uac-8_ubuntu_driver_alsa](https://github.com/knmusicstudio/uac-8_ubuntu_driver_alsa) for direct DAW/ALSA integration without running this bridge app.
+
 ### ⚠️ Disclaimer
-* This project is **unofficial and experimental**.
-* It is **NOT** affiliated with, endorsed by, or supported by ZOOM Corporation.
-* Use this software **at your own risk**. The author assumes no responsibility for any hardware damage, audio spikes, hearing damage, or data loss.
+- This project is **unofficial and experimental**.
+- It is **NOT** affiliated with, endorsed by, or supported by ZOOM Corporation.
+- Use this software **at your own risk**. The author assumes no responsibility for any hardware damage, audio spikes, hearing damage, or data loss.
 
 ### Prerequisites (Ubuntu / Debian)
 Install the required build dependencies:
@@ -21,78 +33,80 @@ sudo apt update
 sudo apt install build-essential pkg-config libgtk-3-dev libjack-jackd2-dev libusb-1.0-0-dev
 ```
 Make sure your user belongs to the audio group and has appropriate permissions to access USB devices.
-How to Build
+
+### How to Build
 ```bash
-git clone https://github.com/knmusicstudio/uac-8_ubuntu_driver/zoom-uac8-linux-bridg.git
-cd zoom-uac8-linux-bridge
-make
-```
-How to Run
-Start the JACK server using the dummy driver (e.g., via QjackCtl).
-
-Connect your ZOOM UAC-8 to your PC via USB.
-
-Launch the bridge:
-
-```Bash
-./uac8_bridge
-Click "起動" (Start) on the GUI window.
-```
-In QjackCtl / Patchbay, route audio to uac8_jack:playback_1 through playback_18.
-
-System Requirements
-* CPU: 64-bit (x86_64) processor (Intel Core i3 / AMD Ryzen or better recommended, SSE2/AVX support required)
-* OS: Linux (Ubuntu 20.04 LTS or later, Debian 11+, Arch Linux, etc.)
-* USB: USB 3.0 (SuperSpeed) port REQUIRED (Does not work on USB 2.0 due to insufficient bandwidth)
-
-
-License
-MIT License
-
-<a name="japanese"></a>
-日本語
-
-JACK Audio Connection Kit と libusb を使用して、Linux 上で ZOOM UAC-8 オーディオインターフェースをNatve環境で動作させるための実験的なユーザ空間オーディオブリッジです。
-
-### ⚠️ 免責事項
-本プロジェクトは非公式かつ実験的なものです。
-株式会社ズーム（ZOOM Corporation）とは一切関係がなく、公式なサポートや推奨を受けたものではありません。
-本ソフトウェアの使用は完全自己責任でお願いいたします。機器の故障、突発的な大音量による聴覚・機材への被害、データの損失等に関して、作者は一切の責任を負いません。
-
-### 必要パッケージの導入 (Ubuntu / Debian 系)
-
-ビルドに必要な依存パッケージをインストールしてください
-```Bash
-sudo apt update
-sudo apt install build-essential pkg-config libgtk-3-dev libjack-jackd2-dev libusb-1.0-0-dev
-```
-※ お使いのユーザーが audio グループに所属し、USB デバイスへのアクセス権限を持っていることを確認してください。
-
-### ビルド手順
-```Bash
 git clone https://github.com/knmusicstudio/zoom-uac8-linux-bridge.git
 cd zoom-uac8-linux-bridge
 make
 ```
-### 使い方
-QjackCtl 等をdummyで起動し、JACK サーバーを開始します。
 
-ZOOM UAC-8 を PC に USB 接続します。
+### How to Run
+1. Start the JACK server using the dummy driver (e.g., via QjackCtl).
+2. Connect your ZOOM UAC-8 to your PC via USB.
+3. Launch the bridge:
 
-プログラムを実行します。
-
-```Bash
+```bash
 ./uac8_bridge
 ```
-表示されたウィンドウの 「起動」 ボタンを押します。
+4. Click "起動" (Start) on the GUI window.
+5. In QjackCtl / Patchbay, route audio to `uac8_jack:playback_1` through `playback_18`.
 
-QjackCtl のパッチベイや接続画面で、uac8_jack:playback_1 〜 playback_18 に音声をルーティングします。
+### System Requirements
+- CPU: 64-bit (x86_64) processor (Intel Core i3 / AMD Ryzen or better recommended, SSE2/AVX support required)
+- OS: Linux (Ubuntu 20.04 LTS or later, Debian 11+, Arch Linux, etc.)
+- USB: USB 3.0 (SuperSpeed) port REQUIRED (Does not work on USB 2.0 due to insufficient bandwidth)
+
+### License
+MIT License
+
+---
+
+<a name="japanese"></a>
+## 日本語
+
+JACK Audio Connection Kit と libusb を使用して、Linux 上で ZOOM UAC-8 オーディオインターフェースを Native 環境で動作させるための実験的なユーザ空間オーディオブリッジです。
+
+> 💡 **お知らせ:** ネイティブの ALSA カーネルドライバが完成しました！  
+> このブリッジアプリや dummy JACK を使わず、直接システムや DAW からネイティブ認識させたい場合は、以下のリポジトリをご利用ください。  
+> 👉 [https://github.com/knmusicstudio/uac-8_ubuntu_driver_alsa](https://github.com/knmusicstudio/uac-8_ubuntu_driver_alsa)
+
+### ⚠️ 免責事項
+- 本プロジェクトは非公式かつ実験的なものです。
+- 株式会社ズーム（ZOOM Corporation）とは一切関係がなく、公式なサポートや推奨を受けたものではありません。
+- 本ソフトウェアの使用は完全自己責任でお願いいたします。機器の故障、突発的な大音量による聴覚・機材への被害、データの損失等に関して、作者は一切の責任を負いません。
+
+### 必要パッケージの導入 (Ubuntu / Debian 系)
+
+ビルドに必要な依存パッケージをインストールしてください：
+```bash
+sudo apt update
+sudo apt install build-essential pkg-config libgtk-3-dev libjack-jackd2-dev libusb-1.0-0-dev
+```
+※ お使いのユーザーが `audio` グループに所属し、USB デバイスへのアクセス権限を持っていることを確認してください。
+
+### ビルド手順
+```bash
+git clone https://github.com/knmusicstudio/zoom-uac8-linux-bridge.git
+cd zoom-uac8-linux-bridge
+make
+```
+
+### 使い方
+1. QjackCtl 等を dummy ドライバで起動し、JACK サーバーを開始します。
+2. ZOOM UAC-8 を PC に USB 接続します。
+3. プログラムを実行します。
+
+```bash
+./uac8_bridge
+```
+4. 表示されたウィンドウの 「起動」 ボタンを押します。
+5. QjackCtl のパッチベイや接続画面で、`uac8_jack:playback_1` 〜 `playback_18` に音声をルーティングします。
 
 ### 動作環境
-* CPU: 64ビット（x86_64）プロセッサ（Intel Core i3 / AMD Ryzen 以上推奨、SSE2 / AVX 対応必須）
-* OS: Linux（Ubuntu 20.04 LTS 以降、Debian 11 以降、Arch Linux など）
-* USBポート: USB 3.0 (SuperSpeed) 必須（※USB 2.0 ポートでは帯域不足のため動作しません）
+- CPU: 64ビット（x86_64）プロセッサ（Intel Core i3 / AMD Ryzen 以上推奨、SSE2 / AVX 対応必須）
+- OS: Linux（Ubuntu 20.04 LTS 以降、Debian 11 以降、Arch Linux など）
+- USBポート: USB 3.0 (SuperSpeed) 必須（※USB 2.0 ポートでは帯域不足のため動作しません）
 
-
-ライセンス
+### ライセンス
 MIT License
